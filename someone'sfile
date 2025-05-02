@@ -1,0 +1,1310 @@
+import os
+from abc import ABC, abstractmethod
+from enum import Enum
+from typing import List, Optional, Set
+from datetime import datetime, date
+import json
+
+import pytz
+from multipledispatch import dispatch
+
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Boolean,
+    Float,
+    DateTime,
+    Date,
+    ForeignKey,
+    MetaData,
+    Text
+)
+from sqlalchemy.orm import (
+    declarative_base,
+    sessionmaker,
+    scoped_session,
+    relationship
+)
+from sqlalchemy.exc import SQLAlchemyError
+
+# If you have a local module for database session setup
+#from .database import get_session   !!!Adjust the relative path as needed
+
+
+from datetime import datetime
+
+filename = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.db"
+
+engine = create_engine(
+    f'sqlite:///{filename}.db',
+    echo=False,
+    future=True           # Use SQLAlchemy 2.0-style returns and behaviors
+)
+
+# Declarative base class: all ORM models will inherit from this
+Base = declarative_base()
+
+# Session factory: create Session objects to interact with the database
+# Session factory
+def get_session():
+    SessionLocal = sessionmaker(bind=engine, autoflush=False)
+    return SessionLocal()
+
+
+
+# Initialize the database (create tables for all Base subclasses)
+def init_db():
+    """
+    Import all ORM models before calling this, then run to create tables in 'first.db'.
+    """
+    Base.metadata.create_all(bind=engine)
+
+
+
+# Start of Nada part idk
+class Airport(Base):
+    __tablename__ = 'airports'
+
+    code = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    location = Column(String)
+    country_code = Column(String, ForeignKey('countries.code'))  # ✅ Foreign key to Country.code
+    number_of_terminals = Column(Integer)
+
+    # Relationships
+    country = relationship("Country", back_populates="airports")  # ✅ Works with Country.airports
+    airlines = relationship("Airline", back_populates="base_airport")
+
+    def __init__(self, name: str, code: str, location: str, country_code: str, number_of_terminals: int):
+        self.name = name
+        self.code = code
+        self.location = location
+        self.country_code = country_code
+        self.number_of_terminals = number_of_terminals
+
+    def save(self):
+        session = get_session()
+        session.add(self)
+        session.commit()
+        session.close()
+
+    @staticmethod
+    def create_flight(session, departure_code: str, flight_number: str, destination_code: str,
+                      departure_time: str, arrival_time: str, total_seats: int,
+                      gate: str, terminal: str, airline_id: int, days_of_operation: int):
+        flight = Flight(
+            flight_number=flight_number,
+            departure_code=departure_code,
+            destination_code=destination_code,
+            departure_time=departure_time,
+            arrival_time=arrival_time,
+            total_seats=total_seats,
+            gate=gate,
+            terminal=terminal,
+            airline_id=airline_id,
+            days_of_operation=days_of_operation
+        )
+        session.add(flight)
+        session.commit()
+        print(f"Flight {flight_number} created departing from Airport {departure_code}.")
+
+    def remove_flight(self, flight_number):
+        session = get_session()
+        try:
+            flight = session.query(Flight).filter_by(flight_number=flight_number).first()
+            if not flight:
+                print(f"Flight {flight_number} does not exist.")
+                return
+            session.delete(flight)
+            session.commit()
+            print(f"Flight {flight_number} removed.")
+        except Exception as e:
+            session.rollback()
+            print(f"Error while removing flight: {e}")
+        finally:
+            session.close()
+
+    @staticmethod
+    def manage_seats(session, flight_id: int):
+        flight = session.query(Flight).filter_by(id=flight_id).first()
+        if not flight:
+            print(f"No flight found with ID {flight_id}")
+            return
+        print(f"Managing seats for Flight {flight.flight_number}:")
+        for seat in flight.seats:
+            print(seat.get_seat_info())
+
+class Airline(Base):
+    __tablename__ = 'airlines'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    location = Column(String, nullable=False)
+    IATA_code = Column(String, unique=True)
+    ICAO_code = Column(String, unique=True)
+    headquarters = Column(String)
+    year_founded = Column(Integer)
+    base_airport_code = Column(String, ForeignKey('airports.code'))
+
+    base_airport = relationship("Airport", back_populates="airlines")
+    flights = relationship("Flight", back_populates="airline")
+
+    def __init__(self, name,location,country_code, IATA_code, ICAO_code, headquarters, year_founded, base_airport_code):
+        self.name = name
+        self.location = location
+        self.country_code = country_code
+        self.IATA_code = IATA_code
+        self.ICAO_code = ICAO_code
+        self.headquarters = headquarters
+        self.year_founded = year_founded
+        self.base_airport_code = base_airport_code
+
+    @staticmethod
+    def create_flight(session, airline_id: int, flight_number: str, departure_code: str, destination_code: str,
+                      departure_time: str, arrival_time: str, total_seats: int, gate: str, terminal: str, days_of_operation: int):
+        try:
+            flight = Flight(
+                flight_number=flight_number,
+                departure_code=departure_code,
+                destination_code=destination_code,
+                departure_time=departure_time,
+                arrival_time=arrival_time,
+                total_seats=total_seats,
+                gate=gate,
+                terminal=terminal,
+                airline_id=airline_id,
+                days_of_operation=days_of_operation
+            )
+            session.add(flight)
+            session.commit()
+            print(f"Flight {flight_number} created for Airline ID {airline_id}.")
+        except Exception as e:
+            session.rollback()
+            print(f"Error creating flight: {e}")
+
+    @staticmethod
+    def delete_flight(session, airline_id: int, flight_number: str):
+        try:
+            flight = session.query(Flight).filter_by(airline_id=airline_id, flight_number=flight_number).first()
+            if not flight:
+                print(f"Flight {flight_number} does not exist for Airline ID {airline_id}.")
+                return
+            session.delete(flight)
+            session.commit()
+            print(f"Flight {flight_number} deleted for Airline ID {airline_id}.")
+        except Exception as e:
+            session.rollback()
+            print(f"Error deleting flight: {e}")
+
+    def get_flight(self, flight_number):
+        for flight in self.flights:
+            if flight.flight_number == flight_number:
+                return flight
+        return None
+
+    @staticmethod
+    def manage_seats(session, flight_id: int):
+        flight = session.query(Flight).filter_by(id=flight_id).first()
+        if not flight:
+            print(f"No flight found with ID {flight_id}")
+            return
+
+        print(f"Managing seats for Flight {flight.flight_number}:")
+        for seat in flight.seats:
+            print(seat.get_seat_info())
+        
+class Administrator(Base):
+    __tablename__ = 'administrators'
+
+    adminID = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    role = Column(String)
+    contactEmail = Column(String)
+    hasManagementAccess = Column(Boolean, default=False)
+
+    def __init__(self, adminID: str, name: str, role: str, contactEmail: str, hasManagementAccess: bool):
+        self.adminID = adminID
+        self.name = name
+        self.role = role
+        self.contactEmail = contactEmail
+        self.hasManagementAccess = hasManagementAccess
+
+        # In-memory lists (not persisted)
+        self.managedFlights = []
+        self.pendingApprovals = []
+
+        try:
+            session = get_session()
+            session.add(self)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            print(f"Error creating administrator: {e}")
+        finally:
+            session.close()
+
+    def manage_flights(self, flight):
+        self.managedFlights.append(flight)
+
+    def approve_reservation(self, reservation):
+        if reservation in self.pendingApprovals:
+            self.pendingApprovals.remove(reservation)
+            print("Reservation approved.")
+
+    def review_complaints(self):
+        print("Reviewing complaints...")
+
+class Country(Base):
+    __tablename__ = 'countries'
+
+    code = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    continent = Column(String)
+    official_language = Column(String)
+    is_schengen_zone_member = Column(Boolean, default=False)
+
+    airports = relationship("Airport", back_populates="country")  # if defined on Airport
+    # You can also define relationships to flights if needed
+
+    def __init__(self, name: str, code: str, continent: str, official_language: str, is_schengen_zone_member: bool):
+        self.name = name
+        self.code = code
+        self.continent = continent
+        self.official_language = official_language
+        self.is_schengen_zone_member = is_schengen_zone_member
+
+    def __repr__(self):
+        return f"<Country(name={self.name}, code={self.code})>"
+
+class Flight(Base):
+    __tablename__ = 'flights'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    flight_number = Column(String, nullable=False, unique=True)
+    departure_code = Column(String, ForeignKey('airports.code'), nullable=False)
+    destination_code = Column(String, ForeignKey('airports.code'), nullable=False)
+    departure_time = Column(String)  # Consider using DateTime for accuracy
+    arrival_time = Column(String)
+    total_seats = Column(Integer)
+    available_seats = Column(Integer)
+    gate = Column(String)
+    terminal = Column(String)
+    airline_id = Column(Integer, ForeignKey('airlines.id'))
+    days_of_operation = Column(Integer)
+
+    # Relationships
+    seats = relationship("Seat", back_populates="flight", cascade="all, delete-orphan")
+    airline = relationship("Airline", back_populates="flights")
+    departure_airport = relationship("Airport", foreign_keys=[departure_code])
+    destination_airport = relationship("Airport", foreign_keys=[destination_code])
+    reservations = relationship("Reservation", back_populates="flight", cascade="all, delete-orphan")
+
+    def __init__(self, flight_number: str, departure_code: str, destination_code: str,
+                 departure_time: str, arrival_time: str, total_seats: int, gate: str,
+                 terminal: str, airline_id: int, days_of_operation: int):
+        self.flight_number = flight_number
+        self.departure_code = departure_code
+        self.destination_code = destination_code
+        self.departure_time = departure_time
+        self.arrival_time = arrival_time
+        self.total_seats = total_seats
+        self.available_seats = total_seats
+        self.gate = gate
+        self.terminal = terminal
+        self.airline_id = airline_id
+        self.days_of_operation = days_of_operation
+
+    def add_reservation(self, reservation):
+        if reservation.seat.is_available:
+            reservation.seat.reserve_seat()
+            self.reservations.append(reservation)
+            self.available_seats -= 1
+        else:
+            print(f"Seat {reservation.seat.seat_number} is already reserved!")
+
+    def remove_reservation(self, reservation):
+        if reservation in self.reservations:
+            reservation.seat.release_seat()
+            self.reservations.remove(reservation)
+            self.available_seats += 1
+
+    @staticmethod
+    def calculate_empty_seats(session, flight_id: int):
+        flight = session.query(Flight).filter_by(id=flight_id).first()
+        if not flight:
+            print(f"No flight found with ID {flight_id}")
+            return
+        empty_seats = session.query(Seat).filter_by(flight_id=flight_id, is_available=True).count()
+        print(f"Flight {flight.flight_number} has {empty_seats} empty seats.")
+        return empty_seats
+
+    @staticmethod
+    def calculate_duration(departure_time: str, arrival_time: str) -> str:
+        from datetime import datetime
+        fmt = "%H:%M"
+        departure = datetime.strptime(departure_time, fmt)
+        arrival = datetime.strptime(arrival_time, fmt)
+        duration = arrival - departure
+        return str(duration)
+
+    def __repr__(self):
+        return f"<Flight({self.flight_number}: {self.departure_code} -> {self.destination_code})>"
+# End of Nada part
+
+
+
+# Start of Hend's part
+class Reservation_status(Enum):
+    pending = "Pending" 
+    confirmed = "Confirmed"
+    canceled = "Canceled" 
+
+class Reservation(Base):
+    __tablename__ = 'reservations'
+
+    id = Column(String, primary_key=True)
+    passenger_id = Column(Integer, ForeignKey('passengers.id'))
+    flight_id = Column(Integer, ForeignKey('flights.id'))  # Changed from flight_number to flight_id
+    seat_number = Column(String)
+    status = Column(String)  # Should ideally use an Enum type (e.g., ReservationStatus)
+    final_price = Column(Float)
+
+    # Relationship to Flight (for easier access to related flight object)
+    flight = relationship("Flight", back_populates="reservations")
+    
+    # Relationship to Passenger
+    passenger = relationship("Passenger", back_populates="reservations")
+
+    def __init__(self, passenger: "Passenger", flight_id: int, reservation_id: str, 
+                 seat_number: str, tickets: List["Ticket"], status: Reservation_status = Reservation_status.pending):
+        session = get_session()
+
+        # Fetch the flight from the database
+        flight = session.query(Flight).filter_by(id=flight_id).first()  # Using 'id' instead of 'flight_number'
+        if not flight:
+            raise ValueError(f"Flight with ID {flight_id} does not exist")
+
+        # Fetch available seats for the flight
+        available_seats = session.query(Seat).filter_by(is_available=True).all()
+        if not available_seats:
+            raise ValueError("No available seats on this flight")
+
+        # Fetch the specific seat from the database
+        seat = session.query(Seat).filter_by(seat_number=seat_number, is_available=True).first()
+        if not seat:
+            raise ValueError(f"Seat {seat_number} is not available")
+
+        # Reserve the seat
+        seat.is_available = False
+        seat.reservation_time = datetime.now()
+        session.commit()
+
+        print(f"Seat {seat_number} has been successfully booked")
+
+        # Initialize the reservation
+        self.id = reservation_id
+        self.flight = flight  # Using the 'flight' relationship now
+        self.passenger = passenger  # Aggregation (passenger related to reservation)
+        self.seat_number = seat_number
+        self.tickets = tickets
+        self.status = status
+        self.final_price = sum(ticket.price for ticket in tickets)  # Calculating initial price
+
+        session.add(self)
+        session.commit()
+        session.close()
+    def add_ticket(self, ticket: "Ticket"):
+        self.tickets.append(ticket)
+        self.final_price += ticket.price  # Update price when ticket is added
+
+    def confirm_reservation(self):
+        self.status = Reservation_status.confirmed
+
+    def cancel_reservation(self):
+        self.status = Reservation_status.canceled
+        for ticket in self.tickets:
+            ticket.cancel_ticket()
+
+    def modify_reservation(self, new_flight=None, new_tickets=None):
+        if new_flight:
+            self.flight = new_flight
+        if new_tickets:
+            self.tickets = new_tickets
+        self.final_price = sum(ticket.price for ticket in self.tickets)
+
+    def add_luggage(self, luggage: "Luggage"):
+        self.luggage = luggage
+        self.final_price += luggage.luggage_fee  # Update price when luggage is added
+
+    def apply_promotion(self, promotion: "Promotion"):
+        if promotion.is_active:
+            self.final_price = promotion.apply_discount(self.final_price)
+
+    def apply_loyalty_points(self, loyaltyProgram: "Loyalty_program"):
+        points = int(self.final_price // 10)
+        loyaltyProgram.add_points(self.passenger, points)
+
+    def price(self):
+        return self.final_price
+
+    def view_reservation_details(self) -> str:
+        details = (
+            f"Reservation ID: {self.id}\n"
+            f"Passenger: {self.passenger.name}\n"
+            f"Flight: {self.flight.flight_number}\n"  # Now accessing flight_number directly from the 'flight' relationship
+            f"Status: {self.status.value}\n"
+            "Tickets:\n"
+        )
+        tickets_info = "\n".join(
+            [f"Seat: {t.seat_number}, Class: {t.ticket_class}, Price: {t.price}" for t in self.tickets]
+        )
+        return details + tickets_info
+
+class Ticket(Base):
+    __tablename__ = 'tickets'
+
+    ticket_number = Column(Integer, primary_key=True, autoincrement=True)
+    passenger = Column(String, ForeignKey('passengers.id'))
+    flight_id = Column(Integer, ForeignKey('flights.id'))
+    seat_number = Column(String)
+    ticket_class = Column(String)
+    status = Column(String)
+    issue_date = Column(DateTime)
+    expiration_date = Column(DateTime)
+    base_price = Column(Float)
+    final_price = Column(Float)
+
+    base_prices = {
+        "first": 6000.0,
+        "business": 3000.0,
+        "premium economy": 2000.0,
+        "economy": 1000.0,
+    }
+
+    def __init__(self, passenger: "Passenger", flight: "Flight", seat_number: str, ticket_class: str, 
+                 is_changeable: Optional[bool] = None, is_refundable: Optional[bool] = None, 
+                 promotion: Optional["Promotion"] = None):
+        
+        # Normalize ticket class
+        ticket_class = ticket_class.strip().lower()
+
+        print(f"Processed ticket_class: '{ticket_class}'") 
+        print(f"Valid classes: {list(Ticket.base_prices.keys())}")
+        if ticket_class not in Ticket.base_prices:
+            raise ValueError(f"Invalid ticket class: {ticket_class}. Must be one of {list(Ticket.base_prices.keys())}")
+        
+        self.passenger = passenger
+        self.flight = flight
+        self.seat_number = seat_number
+        self.ticket_class = ticket_class
+        self.status = "active"
+        self.issue_date = datetime.now()
+        self.promotion = promotion
+        self.expiration_date = None
+        self.base_price = Ticket.base_prices[ticket_class]
+        self.final_price = self.get_final_price()
+
+        # Set changeable and refundable based on ticket class if not provided
+        self.is_changeable = is_changeable if is_changeable is not None else self.ticket_class in {"first", "business"}
+        self.is_refundable = is_refundable if is_refundable is not None else self.ticket_class == "first"
+        
+        # Save to database
+        session = get_session()
+        session.add(self)
+        session.commit()
+        session.close()
+
+        # Add the ticket to the latest reservation if available
+        latest_reservation = self.passenger.get_latest_reservation()
+        if latest_reservation:
+            latest_reservation.add_ticket(self)
+
+    def get_ticket_number(self):
+        return self.ticket_number  # Use auto-generated ticket_number
+
+    def issue_ticket(self):
+        self.expiration_date = self.issue_date.replace(year=self.issue_date.year + 1)
+
+    def cancel_ticket(self):
+        if self.is_refundable:
+            self.status = "canceled"
+            return "The Ticket was canceled and your money was refunded"
+        else:
+            return "This ticket is Nonrefundable."
+
+    def change_seat(self, new_seat: str):
+        if self.is_changeable:
+            self.seat_number = new_seat
+            return f"Your Seat changed to {new_seat}."
+        else:
+            return "This ticket is not changeable."
+
+    def is_ticket_valid(self):
+        if self.expiration_date and datetime.now() > self.expiration_date:
+            self.status = "expired"
+            return False
+        return True
+
+    def get_final_price(self):
+        if self.promotion:
+            return self.promotion.apply_discount(self.base_price)
+        return self.base_price
+
+    def set_promotion(self, promotion: "Promotion"):
+        if promotion.is_valid():
+            self.promotion = promotion
+            self.final_price = self.get_final_price()
+
+    @property
+    def price(self):
+        return self.final_price
+
+    def ticket_information(self):
+        promo_information = (f"The added offer: {self.promotion.promo_code} "
+                             f"({self.promotion.discount_percentage}% discount)"
+                             if self.promotion else "There is no discount")
+        
+        return (
+            f"Ticket Number: {self.ticket_number}\n"
+            f"Passenger: {self.passenger}\n"
+            f"Flight: {self.flight.flight_number}\n"
+            f"Seat: {self.seat_number}\n"
+            f"Ticket Class: {self.ticket_class}\n"
+            f"Original Price: {self.base_price}\n"
+            f"Price After Discount: {self.final_price}\n"
+            f"Status: {self.status}\n"
+            f"Issue Date: {self.issue_date}\n"
+            f"Expiration Date: {self.expiration_date if self.expiration_date else 'Not defined'}\n"
+            f"{promo_information}"
+        )
+
+class Promotion(Base):
+    __tablename__ = 'promotions'
+    
+    promo_id = Column(String, primary_key=True)
+    description = Column(String)
+    discount_percentage = Column(Float)
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
+    promo_code = Column(String)
+    min_purchase = Column(Float)
+    max_discount = Column(Float)
+    usage_limit = Column(Integer)
+    usage_count = Column(Integer)
+
+    def __init__(self, promo_id: str, description: str, discount_percentage: float, start_date: datetime, 
+                 end_date: datetime, promo_code: str, min_purchase: float, max_discount: float, usage_limit: int):
+        self.promo_id = promo_id
+        self.description = description
+        self.discount_percentage = discount_percentage
+        self.start_date = start_date
+        self.end_date = end_date
+        self.promo_code = promo_code
+        self.min_purchase = min_purchase
+        self.max_discount = max_discount
+        self.usage_limit = usage_limit
+        self.usage_count = 0
+
+    @staticmethod
+    def check_promotion_validity(session, promo_id: str) -> bool:
+        promotion = session.query(Promotion).filter_by(promo_id=promo_id).first()
+        if not promotion:
+            raise ValueError(f"No promotion found with ID: {promo_id}")
+
+        now = datetime.now()
+        # Promotion is valid if the current date is within the promotion period and usage limit is not exceeded
+        is_valid = promotion.start_date <= now <= promotion.end_date and promotion.usage_count < promotion.usage_limit
+        return is_valid
+
+    @staticmethod
+    def apply_discount(session, promo_id: str, original_price: float) -> float:
+        promotion = session.query(Promotion).filter_by(promo_id=promo_id).first()
+        if not promotion:
+            raise ValueError(f"No promotion found with ID: {promo_id}")
+
+        if not Promotion.check_promotion_validity(session, promo_id):
+            raise ValueError(f"Promotion {promo_id} is not valid or has expired.")
+        
+        discounted_price = original_price * (1 - promotion.discount_percentage / 100)
+        discounted_price = min(discounted_price, promotion.max_discount)  # Ensure max discount is respected
+
+        # Update usage_count and commit to the database to prevent multiple usage
+        promotion.usage_count += 1
+        session.commit()
+
+        return discounted_price
+
+    @staticmethod
+    def extend_promotion(session, promo_id: str, new_end_date: datetime):
+        promotion = session.query(Promotion).filter_by(promo_id=promo_id).first()
+        if not promotion:
+            raise ValueError(f"No promotion found with ID: {promo_id}")
+
+        if new_end_date > promotion.end_date:
+            promotion.end_date = new_end_date
+            session.commit()
+            print(f"Promotion {promo_id} has been extended to {new_end_date.strftime('%Y-%m-%d')}.")
+        else:
+            raise ValueError("The new date must be after the current end date.")
+
+    @staticmethod
+    def get_promotion_info(session, promo_id: str) -> str:
+        promotion = session.query(Promotion).filter_by(promo_id=promo_id).first()
+        if not promotion:
+            raise ValueError(f"No promotion found with ID: {promo_id}")
+
+        # Check if the promotion is valid at the moment
+        promo_validity = 'Active' if Promotion.check_promotion_validity(session, promo_id) else 'Expired'
+        
+        return (f"Promo ID: {promotion.promo_id}\n"
+                f"Description: {promotion.description}\n"
+                f"Discount: {promotion.discount_percentage}% (Max: {promotion.max_discount})\n"
+                f"Min Purchase: {promotion.min_purchase}\n"
+                f"Promo Code: {promotion.promo_code}\n"
+                f"Usage Limit: {promotion.usage_limit}, Usage Count: {promotion.usage_count}\n"
+                f"Start Date: {promotion.start_date.strftime('%Y-%m-%d')}\n"
+                f"End Date: {promotion.end_date.strftime('%Y-%m-%d')}\n"
+                f"Status: {promo_validity}")
+
+class Special_promotion(Promotion):
+    __tablename__ = 'special_promotions'
+
+    # Foreign key to the parent Promotion table
+    promo_id = Column(String, ForeignKey('promotions.promo_id'), primary_key=True)
+    extra_bonus = Column(Float, nullable=False)  # Additional attribute for Special_promotion
+
+    def __init__(self, promo_id: str, description: str, discount_percentage: float, start_date: datetime, 
+                 end_date: datetime, promo_code: str, min_purchase: float, max_discount: float, 
+                 usage_limit: int, extra_bonus: float):
+        super().__init__(promo_id, description, discount_percentage, start_date, end_date, promo_code, 
+                         min_purchase, max_discount, usage_limit)
+        self.extra_bonus = extra_bonus
+
+    def apply_discount(self, original_price: float) -> float:
+        # Apply both discount and extra bonus
+        total_discount = self.discount_percentage + self.extra_bonus
+        discounted_price = original_price * (1 - total_discount / 100)
+        
+        # Ensure the discount does not exceed the max discount
+        discounted_price = min(discounted_price, self.max_discount)
+        
+        return discounted_price
+
+    def promotion_information(self) -> str:
+        # Include base promotion info and extra bonus
+        base_information = super().promotion_information()
+        return base_information + f" Extra Bonus: {self.extra_bonus}%"
+
+from typing import Tuple
+
+class Base_luggage(Base):
+    __abstract__ = True
+
+    def __init__(self, luggage_id: str, passenger: "Passenger", ticket: "Ticket", weight: float,
+                 dimensions: Tuple[float, float, float] = (0, 0, 0), luggage_fee: float = 0.0, 
+                 status: str = "Pending", is_checked_in: bool = False, is_fragile: bool = False):
+        self.luggage_id = luggage_id
+        self.passenger = passenger
+        self.ticket = ticket
+        self.weight = weight
+        self.dimensions = dimensions
+        self.is_fragile = is_fragile
+        self.status = status
+        self.is_checked_in = is_checked_in
+        self.tracking_history = []  # Keeps track of status changes over time.
+        self.luggage_fee = luggage_fee  # Fee to be calculated based on weight and other factors.
+        self.fine = 0  # Default fine is set to zero.
+
+    @abstractmethod
+    def calculate_fee(self):
+        pass
+
+class Luggage(Base_luggage):
+    max_weight_limit = 50
+    free_weight_limit = 20
+    fee_per_kg = 10
+    overweight_fine = 100
+    __tablename__ = 'luggage'
+    luggage_id = Column(String, primary_key=True)
+    passenger_id = Column(String, ForeignKey('passengers.id'))
+    ticket_id = Column(String, ForeignKey('tickets.ticket_number'))
+    weight = Column(Float)
+    dimensions = Column(String)
+    luggage_fee = Column(Float)
+    status = Column(String)
+    is_checked_in = Column(Boolean, default=False)
+    is_fragile = Column(Boolean, default=False)
+
+    def __init__(self, luggage_id: str, passenger: "Passenger", ticket: "Ticket", weight: float,
+                 ticket_class: str, dimensions: tuple = (0, 0, 0), luggage_fee: float = 0.0,
+                 status: str = "Pending", is_checked_in: bool = False, is_fragile: bool = False):
+        super().__init__(luggage_id, passenger, ticket, weight, dimensions, luggage_fee, status, is_checked_in, is_fragile)
+        self.ticket_class = ticket_class
+        self.weight_status, self.luggage_fee = self.check_luggage_weight()
+
+    def check_luggage_weight(self):
+        ticket_class_limits = {
+            "economy": 20,
+            "business": 30,
+            "first": 40
+        }
+        allowed_weight = ticket_class_limits.get(self.ticket.ticket_class, 20)
+        if self.weight <= self.free_weight_limit:
+            return "Within free limit", 0
+        elif self.free_weight_limit < self.weight <= self.max_weight_limit:
+            extra_weight = self.weight - self.free_weight_limit
+            return "Extra Weight", extra_weight * self.fee_per_kg
+        else:
+            return "Exceeds maximum limit", 0
+
+    def apply_overweight_fine(self):
+        if self.weight > self.max_weight_limit:
+            self.fine = self.overweight_fine
+            self.luggage_fee += self.fine
+            return f"Overweight fine of {self.overweight_fine} applied to luggage {self.luggage_id}. New luggage fee: {self.luggage_fee} EGP"
+        else:
+            return "There is no fine applied."
+
+    def update_luggage_status(self):
+        if self.weight > self.max_weight_limit:
+            self.status = "Overweight"
+            self.apply_overweight_fine()
+        else:
+            self.status = "Approved"
+        if self.is_fragile:
+            self.status += " - Fragile item so handle with care."
+        self.track_luggage_status()
+
+    def track_luggage_status(self):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.tracking_history.append(f"{timestamp}: {self.status}")
+
+    def luggage_information(self):
+        return (f"Luggage ID: {self.luggage_id}\n"
+                f"Passenger: {self.passenger.name}\n"
+                f"Weight: {self.weight}\n"
+                f"Dimensions (L W H): {self.dimensions}\n"
+                f"Fragile: {'Yes' if self.is_fragile else 'No'}\n"
+                f"Luggage Fee: {self.luggage_fee} EGP\n"
+                f"Luggage Fine: {self.fine} EGP\n"
+                f"Status: {self.status}")
+
+class Standard_luggage(Luggage):
+    def calculate_fee (self) :
+        return max ( 0 , (self.weight - 20 ) * 10 ) 
+
+class Overweight_luggage(Luggage) :
+    def calculate_fee (self) :
+        return 100 + max( 0 , (self.weight - 30) * 15 ) 
+
+class Loyalty_program(Base):
+    __tablename__ = 'loyalty_programs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    program_name = Column(String)
+    passenger_id = Column(Integer, ForeignKey('passengers.id'), unique=True)  # One-to-one relationship
+    points = Column(Integer)
+    tier_level = Column(String)
+    required_points_for_next_tier = Column(Integer)
+    membership_start_date = Column(DateTime)
+    available_rewards = Column(Text)  # Use Text to store JSON as string
+
+    # One-to-one relationship with Passenger
+    passenger = relationship("Passenger", back_populates="loyalty_program")
+
+    def __init__(self, program_name: str, passenger: "Passenger", points: int, available_rewards: List[str],
+                 membership_start_date: datetime, tier_level: str, required_points_for_next_tier: int):
+        self.program_name = program_name
+        self.passenger = passenger
+        self.points = points
+        self.available_rewards = json.dumps(available_rewards)  # Serialize the rewards list
+        self.membership_start_date = membership_start_date
+        self.tier_level = tier_level
+        self.required_points_for_next_tier = required_points_for_next_tier
+
+    def add_points(self, pts: int):
+        if pts > 0:
+            self.points += pts
+            print(f"{pts} points have been added to your account. Total Points: {self.points}")
+
+    def redeem_points(self, pts: int):
+        if pts > 0 and pts <= self.points:
+            self.points -= pts
+            print(f"You have redeemed {pts} points. Remaining points: {self.points}")
+        else:
+            print("You don't have enough points to redeem.")
+
+    def check_tier_upgrade(self):
+        if self.points >= self.required_points_for_next_tier:
+            print("You are eligible for an upgrade. You can move to a higher tier.")
+            # Optionally, upgrade the tier here
+        else:
+            print(f"You need {self.required_points_for_next_tier - self.points} more points to upgrade.")
+
+    def get_program_info(self):
+        available_rewards_list = self.get_available_rewards()  # Deserialize the rewards list
+        return (f"Loyalty Program: {self.program_name}\n"
+                f"Passenger: {self.passenger.name}\n"  # Ensure passenger has a `name` attribute
+                f"Current Points: {self.points}\n"
+                f"Membership Start Date: {self.membership_start_date.strftime('%Y-%m-%d')}\n"
+                f"Points Needed for Upgrade: {self.required_points_for_next_tier}\n"
+                f"Available Rewards: {', '.join(available_rewards_list)}")
+
+    def get_available_rewards(self):
+        return json.loads(self.available_rewards)  # Deserialize the JSON string to a Python list
+#  End of Hend's part
+
+
+
+# Start of Aya part
+class Seat(Base):
+    __tablename__ = 'seats'
+
+    seat_id = Column(Integer, primary_key=True, autoincrement=True)
+    seat_number = Column(String, nullable=False)
+    class_type = Column(String, nullable=False)
+    is_available = Column(Boolean, default=True)
+    seat_type = Column(String, nullable=False)
+    additional_features = Column(Text, default="[]")  # Store as JSON string
+    reservation_time = Column(DateTime, nullable=True)
+    flight_id = Column(Integer, ForeignKey('flights.id'))
+    flight = relationship("Flight", back_populates="seats")
+
+    def __init__(self, seat_number: str, class_type: str, is_available: bool, seat_type: str, flight_id: int, additional_features: List[str] = None):
+        self.seat_number = seat_number
+        self.class_type = class_type
+        self.is_available = is_available
+        self.seat_type = seat_type
+        self.flight_id = flight_id
+        self.additional_features = json.dumps(additional_features) if additional_features else "[]"  # Serialize list to JSON string
+        self.reservation_time = None
+
+    @staticmethod
+    def calculate_empty_seats(session, flight_id: int):
+        empty_seats = session.query(Seat).filter_by(flight_id=flight_id, is_available=True).count()
+        print(f"Flight {flight_id} has {empty_seats} empty seats.")
+        return empty_seats
+
+    @staticmethod
+    def display_reserved_seats(session, flight_id: int):
+        reserved_seats = session.query(Seat).filter_by(flight_id=flight_id, is_available=False).all()
+        if not reserved_seats:
+            print(f"No reserved seats found for Flight ID {flight_id}")
+            return
+
+        print(f"Reserved seats for Flight ID {flight_id}:")
+        for seat in reserved_seats:
+            print(f"Seat Number: {seat.seat_number}, Reserved at: {seat.reservation_time}")
+
+    def reserve_seat(self):
+        if self.is_available:
+            self.is_available = False
+            self.reservation_time = datetime.now()
+            print(f"Seat {self.seat_number} has been reserved at {self.reservation_time}.")
+        else:
+            print(f"Seat {self.seat_number} is already reserved.")
+
+    def release_seat(self):
+        if not self.is_available:
+            self.is_available = True
+            self.reservation_time = None
+            print(f"Seat {self.seat_number} is now available.")
+        else:
+            print(f"Seat {self.seat_number} is not reserved.")
+
+    def get_additional_features(self):
+        return json.loads(self.additional_features)  # Deserialize the JSON string to a Python list
+
+    def __str__(self):
+        return f"Seat {self.seat_number} - Class: {self.class_type}, Type: {self.seat_type}, Available: {self.is_available}"
+
+class Passenger(Base):
+    __tablename__ = 'passengers'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String)
+    national_id = Column(String, unique=True)  # Make national_id a unique key
+    email = Column(String)
+    phone_number = Column(String)
+    nationality = Column(String)
+    is_vip = Column(Boolean)
+    address = Column(String)
+    date_of_birth = Column(Date)  # Changed to Date type
+    passport_number = Column(String)
+    gender = Column(String)
+    frequent_flyer_number = Column(String, unique=True)  # Unique constraint added
+
+    # One-to-one relationship with Loyalty_program
+    loyalty_program = relationship("Loyalty_program", back_populates="passenger", uselist=False)
+
+    reservations = relationship("Reservation", back_populates="passenger", cascade="all, delete-orphan")
+
+
+
+    def __init__(self, name: str, national_id: str, email: str, phone_number: str, nationality: str, is_vip: bool, address: str, 
+                 date_of_birth: str, passport_number: str, gender: str, frequent_flyer_number: str):
+        self.name = name
+        self.national_id = national_id
+        self.email = email
+        self.phone_number = phone_number
+        self.nationality = nationality
+        self.is_vip = is_vip
+        self.address = address
+        self.date_of_birth = datetime.strptime(date_of_birth, "%Y-%m-%d") if isinstance(date_of_birth, str) else date_of_birth
+        self.passport_number = passport_number
+        self.gender = gender
+        self.frequent_flyer_number = frequent_flyer_number
+
+    @staticmethod
+    def enroll_in_loyalty_program(session, national_id: str, program_name: str):
+        passenger = session.query(Passenger).filter_by(national_id=national_id).first()
+        if not passenger:
+            print(f"No passenger found with National ID: {national_id}")
+            return
+
+        if not passenger.loyalty_program:
+            loyalty_program = Loyalty_program(
+                program_name=program_name,
+                passenger=passenger,
+                points=0,
+                available_rewards=[],
+                membership_start_date=datetime.now(),
+                tier_level="Basic",
+                required_points_for_next_tier=100
+            )
+            session.add(loyalty_program)
+            session.commit()
+            print(f"{passenger.name} has been enrolled in the {program_name} loyalty program.")
+        else:
+            print(f"{passenger.name} is already enrolled in the {passenger.loyalty_program.program_name} loyalty program.")
+
+    @staticmethod
+    def get_passenger_info(session, national_id: str):
+        passenger = session.query(Passenger).filter_by(national_id=national_id).first()
+        if not passenger:
+            return f"No passenger found with National ID: {national_id}"
+
+        loyalty_info = f"Loyalty Program: {passenger.loyalty_program.program_name}" if passenger.loyalty_program else "There is no loyalty program."
+        return (f"Passenger ID: {passenger.id}\n"
+                f"Name: {passenger.name}\n"
+                f"National ID: {passenger.national_id}\n"
+                f"Phone Number: {passenger.phone_number}\n"
+                f"Nationality: {passenger.nationality}\n"
+                f"VIP Status: {passenger.is_vip}\n"
+                f"Address: {passenger.address}\n"
+                f"Date of Birth: {passenger.date_of_birth.strftime('%Y-%m-%d')}\n"
+                f"Passport Number: {passenger.passport_number}\n"
+                f"Gender: {passenger.gender}\n"
+                f"Frequent Flyer Number: {passenger.frequent_flyer_number}\n"
+                f"{loyalty_info}")
+
+    def __str__(self):
+        return f"Passenger: {self.name}, National ID: {self.national_id}, Email: {self.email}"
+
+class Currency(Base):
+    __tablename__ = 'currencies'
+    
+    currency_code = Column(String, primary_key=True)
+    symbol = Column(String)
+    exchange_rate = Column(Float)
+    country_name = Column(String)
+    last_updated = Column(DateTime)
+
+    def __init__(self, currency_code: str, symbol: str, exchange_rate: float, country_name: str, last_updated: datetime):
+        self.currency_code = currency_code
+        self.symbol = symbol
+        self.exchange_rate = exchange_rate
+        self.country_name = country_name
+        self.last_updated = last_updated
+
+    @staticmethod
+    def convert_to(session, amount: float, source_currency_code: str, target_currency_code: str) -> float:
+        source_currency = session.query(Currency).filter_by(currency_code=source_currency_code).first()
+        target_currency = session.query(Currency).filter_by(currency_code=target_currency_code).first()
+
+        if not source_currency or not target_currency:
+            raise ValueError("One or both currencies do not exist in the database.")
+
+        if source_currency.exchange_rate <= 0 or target_currency.exchange_rate <= 0:
+            raise ValueError("Exchange rate must be a positive number.")
+
+        # Perform the conversion
+        converted_amount = amount * (target_currency.exchange_rate / source_currency.exchange_rate)
+        return round(converted_amount, 2)
+
+    @staticmethod
+    def update_exchange_rate(session, currency_code: str, new_rate: float):
+        currency = session.query(Currency).filter_by(currency_code=currency_code).first()
+
+        if not currency:
+            raise ValueError(f"Currency with code {currency_code} does not exist in the database.")
+
+        if new_rate <= 0:
+            raise ValueError("Exchange rate must be a positive number.")
+
+        currency.exchange_rate = new_rate
+        currency.last_updated = datetime.now()
+        session.commit()
+        print(f"Exchange rate updated to {new_rate} for {currency_code}.")
+
+    @staticmethod
+    def display_currency_info(session, currency_code: str):
+        currency = session.query(Currency).filter_by(currency_code=currency_code).first()
+
+        if not currency:
+            raise ValueError(f"Currency with code {currency_code} does not exist in the database.")
+
+        return {
+            "Currency": f"{currency.currency_code} ({currency.symbol})",
+            "Country": currency.country_name,
+            "Exchange Rate": currency.exchange_rate,
+            "Last Updated": currency.last_updated
+        }
+
+
+class BookingAgent(Base):
+    __tablename__ = 'booking_agents'
+    agent_id = Column("agent_id", String, primary_key=True)
+    name = Column(String)
+    agency = Column(String)
+    contact_number = Column(String)
+    email = Column(String)
+    agency_license_number = Column(String)
+    is_certified = Column(Boolean)
+    
+    # If managed_reservations is related to a Reservation model, it should be a relationship:
+    # managed_reservations = relationship("Reservation", backref="agent")
+
+    def __init__(self, agent_id: str, name: str, agency: str, contact_number: str, email: str, managed_reservations, agency_license_number: str, is_certified: bool):
+        self.agent_id = agent_id
+        self.name = name
+        self.agency = agency
+        self.contact_number = contact_number
+        self.email = email
+        self.managed_reservations = managed_reservations
+        self.agency_license_number = agency_license_number
+        self.is_certified = is_certified
+
+    # No need for properties on simple fields like agent_id, email, etc.
+    # Directly access them as attributes. If you want logic in setters/getters, then use them.
+    @property
+    def contact_number(self):
+        return self.contact_number
+
+    @contact_number.setter
+    def contact_number(self, new_contact_number):
+        self.contact_number = new_contact_number
+
+    @property
+    def email(self):
+        return self.email
+
+    @email.setter
+    def email(self, new_email):
+        self.email = new_email
+
+    @property
+    def agency_license_number(self):
+        return self.agency_license_number
+
+    @property
+    def is_certified(self):
+        return self.is_certified
+
+    def certify_agent(self):
+        self.is_certified = True
+        self.certified_date = datetime.now()  # Log certification date
+
+    def _generate_reservation_id(self) -> str:
+        return f"reservation-{len(self.managed_reservations) + 1}"
+
+    def create_reservation(self, flight, passenger, seat_number, meal_preference=None):
+        reservation_id = self._generate_reservation_id()
+        new_reservation = Reservation(
+            reservation_id=reservation_id,
+            flight=flight,
+            passenger=passenger,
+            seat_number=seat_number,
+            booking_date=datetime.today(),
+            is_confirmed=False,
+            travel_class=seat_number.class_type,
+            special_requests=[],
+            meal_preference=meal_preference,
+            luggage=[]
+        )
+        self.managed_reservations.append(new_reservation)
+        passenger.add_reservation(new_reservation)
+        print(f"Reservation {reservation_id} created by agent {self.name}.")
+        return new_reservation
+
+    def cancel_reservation(self, reservation: 'Reservation'):
+        if reservation in self.managed_reservations:
+            self.managed_reservations.remove(reservation)
+            reservation.passenger.cancel_reservation(reservation)
+            print(f"Reservation {reservation.reservation_id} canceled by agent {self.name}.")
+        else:
+            print("Reservation not found.")
+
+    def find_flights(self, departure, destination, date):
+        # Here you should query the database or other service for available flights
+        available_flights = []  # Replace with actual search logic
+        print(f"Searching for flights from {departure} to {destination} on {date}.")
+        return available_flights
+
+
+class Payment(Base):
+    __tablename__ = 'payments'
+
+    payment_id = Column(String, primary_key=True)
+    amount = Column(Float)
+    method = Column(String)
+    status = Column(String)
+    reservation_id = Column(String, ForeignKey('reservations.id'))
+    payment_date = Column(DateTime)
+    transaction_id = Column(String)
+    currency = Column(String, ForeignKey('currencies.currency_code'))
+    is_refundable = Column(Boolean)
+
+    reservation = relationship("Reservation", backref="payments")
+
+    def __init__(self, payment_id, amount, method, status, payment_date, transaction_id, currency, is_refundable):
+        self.payment_id = payment_id
+        self.amount = amount
+        self.method = method
+        self.status = status
+        self.payment_date = payment_date
+        self.transaction_id = transaction_id
+        self.currency = currency
+        self.is_refundable = is_refundable
+
+    def process_payment(self) -> bool:
+        if self.status == "pending":
+            self.status = "completed"
+            print(f"Payment {self.payment_id} processed successfully")
+            return True
+        elif self.status == "completed":
+            print(f"Payment {self.payment_id} has already been processed successfully")
+            return False
+        else:
+            print(f"Payment {self.payment_id} could not be processed")
+            return False
+
+    def refund(self):
+        if self.is_refundable and self.status == "completed":
+            self.status = "refunded"
+            print(f"Payment {self.payment_id} has been refunded")
+        else:
+            print(f"Payment {self.payment_id} is not refundable.")
+#  End of Aya's part
+
+def test_all_classes_and_relationships():
+    init_db()
+    session = get_session()
+
+    try:
+        # Airports
+        airport1 = Airport(
+            name="John F. Kennedy International Airport", code="JFK",
+            location="New York", country_code="USA", number_of_terminals=6
+        )
+        airport2 = Airport(
+            name="Los Angeles International Airport", code="LAX",
+            location="Los Angeles", country_code="USA", number_of_terminals=9
+        )
+        session.add_all([airport1, airport2])
+        session.commit()
+
+        # Airlines
+        airline1 = Airline(name="Delta Airlines",  location="Atlanta", country_code="USA", IATA_code="DL", ICAO_code="DAL", headquarters="Atlanta", year_founded=1924,base_airport_code="ATL")
+        airline2 = Airline(name="American Airlines", location="Dallas", country_code="USA", IATA_code="AA", ICAO_code="AAL", headquarters="Fort Worth", year_founded=1930, base_airport_code="DFW")
+        session.add_all([airline1, airline2])
+        session.commit()
+
+        # Administrators
+        admin1 = Administrator(adminID="ADM001", name="John Doe", role="Manager", contactEmail="john.doe@example.com", hasManagementAccess=True)
+        admin2 = Administrator(adminID="ADM002", name="Jane Smith", role="Supervisor", contactEmail="jane.smith@example.com", hasManagementAccess=False)
+        session.add_all([admin1, admin2])
+
+        # Countries
+        country1 = Country(name="United States", code="US", continent="North America", official_language="English", is_schengen_zone_member=False)
+        country2 = Country(name="Germany", code="DE", continent="Europe", official_language="German", is_schengen_zone_member=True)
+        session.add_all([country1, country2])
+
+        # Flights
+        flight1 = Flight(flight_number="DL123", departure_code="JFK", destination_code="LAX",
+                         departure_time=datetime(2025, 5, 10, 8, 0), arrival_time=datetime(2025, 5, 10, 11, 0),
+                         total_seats=200, gate="A1", terminal="1", airline_id=airline1.id, days_of_operation=7)
+        flight2 = Flight(flight_number="AA456", departure_code="LAX", destination_code="JFK",
+                         departure_time=datetime(2025, 5, 10, 14, 0), arrival_time=datetime(2025, 5, 10, 22, 0),
+                         total_seats=150, gate="B2", terminal="2", airline_id=airline2.id, days_of_operation=5)
+        session.add_all([flight1, flight2])
+        session.commit()
+
+        # Passengers
+        passenger1 = Passenger(name="Alice Johnson", national_id="123456789", email="alice.johnson@example.com", phone_number="555-1234", nationality="USA", is_vip=True, address="123 Main St", date_of_birth=datetime(1990, 1, 1), passport_number="P123456", gender="Female", frequent_flyer_number="FF123")
+        passenger2 = Passenger(name="Bob Williams", national_id="987654321", email="bob.williams@example.com", phone_number="555-5678", nationality="USA", is_vip=False, address="456 Elm St", date_of_birth=datetime(1985, 5, 15), passport_number="P654321", gender="Male", frequent_flyer_number="FF456")
+        session.add_all([passenger1, passenger2])
+        session.commit()
+
+        # Reservations
+        reservation1 = Reservation(passenger=passenger1.id, flight_number="DL123", reservation_id="R001", seat_number="1A", status="pending")
+        reservation2 = Reservation(passenger=passenger2.id, flight_number="AA456", reservation_id="R002", seat_number="2B", status="pending")
+        session.add_all([reservation1, reservation2])
+        session.commit()
+
+        # Tickets
+        ticket1 = Ticket(ticket_number="T001", passenger=passenger1.id, flight_number="DL123", seat_number="1A", ticket_class="economy")
+        ticket2 = Ticket(ticket_number="T002", passenger=passenger2.id, flight_number="AA456", seat_number="2B", ticket_class="business")
+        session.add_all([ticket1, ticket2])
+
+        # Promotions
+        promotion1 = Promotion(promo_id="PROMO001", description="Holiday Discount", discount_percentage=10.0,
+                               start_date=datetime(2025, 12, 1), end_date=datetime(2025, 12, 31),
+                               promo_code="HOLIDAY10", min_purchase=100.0, max_discount=50.0, usage_limit=100)
+        promotion2 = Promotion(promo_id="PROMO002", description="Summer Sale", discount_percentage=15.0,
+                               start_date=datetime(2025, 6, 1), end_date=datetime(2025, 6, 30),
+                               promo_code="SUMMER15", min_purchase=50.0, max_discount=30.0, usage_limit=200)
+        session.add_all([promotion1, promotion2])
+
+        # Currencies
+        currency1 = Currency(currency_code="USD", symbol="$", exchange_rate=1.0, country_name="United States", last_updated=datetime.now())
+        currency2 = Currency(currency_code="EUR", symbol="€", exchange_rate=0.9, country_name="Eurozone", last_updated=datetime.now())
+        session.add_all([currency1, currency2])
+        session.commit()
+
+        # Booking agents
+        agent1 = BookingAgent(agent_id="AG001", name="Agent Smith", agency="Travel Experts", contact_number="555-9876", email="smith@travelexperts.com", agency_license_number="LIC001", is_certified=True)
+        agent2 = BookingAgent(agent_id="AG002", name="Agent Brown", agency="Holiday Planners", contact_number="555-6543", email="brown@holidayplanners.com", agency_license_number="LIC002", is_certified=False)
+        session.add_all([agent1, agent2])
+
+        # Payments
+        payment1 = Payment(payment_id="PAY001", amount=500.0, method="Credit Card", status="pending", payment_date=datetime.now(), transaction_id="TXN001", currency="USD", is_refundable=True, reservation_id=reservation1.reservation_id)
+        payment2 = Payment(payment_id="PAY002", amount=300.0, method="PayPal", status="completed", payment_date=datetime.now(), transaction_id="TXN002", currency="EUR", is_refundable=False, reservation_id=reservation2.reservation_id)
+        session.add_all([payment1, payment2])
+        session.commit()
+
+        # Test payment methods
+        print("\n--- Testing Payment Methods ---")
+        payment1.process_payment()
+        payment1.refund()
+
+        # Test reservation/payment relationship
+        print("\n--- Testing Reservation and Payment Relationship ---")
+        print(f"Reservation {reservation1.reservation_id} has payment status: {payment1.status}")
+
+        # Test promotion logic
+        print("\n--- Testing Promotion Methods ---")
+        print(Promotion.get_promotion_info(session, promo_id="PROMO001"))
+        Promotion.extend_promotion(session, promo_id="PROMO001", new_end_date=datetime(2026, 1, 31))
+
+        print("\n--- All tests completed successfully ---")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+# Run the test
+test_all_classes_and_relationships()
