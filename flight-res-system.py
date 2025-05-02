@@ -19,7 +19,8 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     MetaData,
-    Text
+    Text,
+    text
 )
 from sqlalchemy.orm import (
     declarative_base,
@@ -279,8 +280,8 @@ class Flight(Base):
     flight_number = Column(String, nullable=False, unique=True)
     departure_code = Column(String, ForeignKey('airports.code'), nullable=False)
     destination_code = Column(String, ForeignKey('airports.code'), nullable=False)
-    departure_time = Column(String)  # Consider using DateTime for accuracy
-    arrival_time = Column(String)
+    departure_time = Column(DateTime)  # Changed to DateTime
+    arrival_time = Column(DateTime)    # Changed to DateTime
     total_seats = Column(Integer)
     available_seats = Column(Integer)
     gate = Column(String)
@@ -296,7 +297,7 @@ class Flight(Base):
     reservations = relationship("Reservation", back_populates="flight", cascade="all, delete-orphan")
 
     def __init__(self, flight_number: str, departure_code: str, destination_code: str,
-                 departure_time: str, arrival_time: str, total_seats: int, gate: str,
+                 departure_time: datetime, arrival_time: datetime, total_seats: int, gate: str,
                  terminal: str, airline_id: int, days_of_operation: int):
         self.flight_number = flight_number
         self.departure_code = departure_code
@@ -335,12 +336,9 @@ class Flight(Base):
         return empty_seats
 
     @staticmethod
-    def calculate_duration(departure_time: str, arrival_time: str) -> str:
-        from datetime import datetime
-        fmt = "%H:%M"
-        departure = datetime.strptime(departure_time, fmt)
-        arrival = datetime.strptime(arrival_time, fmt)
-        duration = arrival - departure
+    def calculate_duration(departure_time: datetime, arrival_time: datetime) -> str:
+        # Duration calculation with proper DateTime objects
+        duration = arrival_time - departure_time
         return str(duration)
 
     def __repr__(self):
@@ -350,7 +348,7 @@ class Flight(Base):
 
 
 # Start of Hend's part
-class Reservation_status(Enum):
+class ReservationStatus(Enum):
     pending = "Pending" 
     confirmed = "Confirmed"
     canceled = "Canceled" 
@@ -360,74 +358,64 @@ class Reservation(Base):
 
     id = Column(String, primary_key=True)
     passenger_id = Column(String, ForeignKey('passengers.id'))
-    flight_id = Column(Integer, ForeignKey('flights.id'))  # Changed from flight_number to flight_id
+    flight_id = Column(Integer, ForeignKey('flights.id'))
     seat_number = Column(String)
-    status = Column(String)  # Should ideally use an Enum type (e.g., ReservationStatus)
+    status = Column(String, default=ReservationStatus.pending.value)  # Using Enum for status
     final_price = Column(Float)
 
-    # Relationship to Flight (for easier access to related flight object)
+    # Relationships
     flight = relationship("Flight", back_populates="reservations")
-    
-    # Relationship to Passenger (assuming 'Passenger' has a 'reservations' attribute)
     passenger = relationship("Passenger", back_populates="reservations")
+    tickets = relationship("Ticket", back_populates="reservation", cascade="all, delete-orphan")
 
-    def __init__(self, passenger: "Passenger", flight_id: int, reservation_id: str, 
-                 seat_number: str, tickets: List["Ticket"], status: Reservation_status = Reservation_status.pending):
-        session = get_session()
-
-        # Fetch the flight from the database
-        flight = session.query(Flight).filter_by(id=flight_id).first()  # Using 'id' instead of 'flight_number'
-        if not flight:
-            raise ValueError(f"Flight with ID {flight_id} does not exist")
-
-        # Fetch available seats for the flight
-        available_seats = session.query(Seat).filter_by(is_available=True).all()
-        if not available_seats:
-            raise ValueError("No available seats on this flight")
-
-        # Fetch the specific seat from the database
-        seat = session.query(Seat).filter_by(seat_number=seat_number, is_available=True).first()
-        if not seat:
-            raise ValueError(f"Seat {seat_number} is not available")
-
-        # Reserve the seat
-        seat.is_available = False
-        seat.reservation_time = datetime.now()
-        session.commit()
-
-        print(f"Seat {seat_number} has been successfully booked")
-
-        # Initialize the reservation
-        self.id = reservation_id
-        self.flight = flight  # Using the 'flight' relationship now
-        self.passenger = passenger  # Aggregation (passenger related to reservation)
+    def __init__(self, passenger: "Passenger", flight: "Flight", seat_number: str,
+                 tickets: List["Ticket"], reservation_id: str = None, status: ReservationStatus = ReservationStatus.pending):
+        self.id = reservation_id or self.generate_reservation_id()
+        self.flight = flight
+        self.passenger = passenger
         self.seat_number = seat_number
         self.tickets = tickets
         self.status = status
         self.final_price = sum(ticket.price for ticket in tickets)  # Calculating initial price
 
-        session.add(self)
-        session.commit()
-        session.close()
+    def generate_reservation_id(self):
+        # Custom method to generate reservation ID
+        return f"RES-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    @staticmethod
+    def reserve_seat(session, flight_id: int, seat_number: str):
+        # Handle seat reservation logic
+        seat = session.query(Seat).filter_by(flight_id=flight_id, seat_number=seat_number, is_available=True).first()
+        if seat:
+            seat.is_available = False
+            seat.reservation_time = datetime.now()
+            session.commit()
+            return seat
+        return None
+
+    def confirm_reservation(self):
+        self.status = ReservationStatus.confirmed
+        self.flight.available_seats -= 1  # Decrease available seats
+        # You can also add logic to commit the reservation change here if needed
+
+    def cancel_reservation(self):
+        self.status = ReservationStatus.canceled
+        for ticket in self.tickets:
+            ticket.cancel_ticket()
+        self.flight.available_seats += 1  # Increase available seats back when canceled
+
+    def modify_reservation(self, new_flight=None, new_seat_number=None, new_tickets=None):
+        if new_flight:
+            self.flight = new_flight
+        if new_seat_number:
+            self.seat_number = new_seat_number
+        if new_tickets:
+            self.tickets = new_tickets
+        self.final_price = sum(ticket.price for ticket in self.tickets)  # Update price when modifying
 
     def add_ticket(self, ticket: "Ticket"):
         self.tickets.append(ticket)
         self.final_price += ticket.price  # Update price when ticket is added
-
-    def confirm_reservation(self):
-        self.status = Reservation_status.confirmed
-
-    def cancel_reservation(self):
-        self.status = Reservation_status.canceled
-        for ticket in self.tickets:
-            ticket.cancel_ticket()
-
-    def modify_reservation(self, new_flight=None, new_tickets=None):
-        if new_flight:
-            self.flight = new_flight
-        if new_tickets:
-            self.tickets = new_tickets
-        self.final_price = sum(ticket.price for ticket in self.tickets)
 
     def add_luggage(self, luggage: "Luggage"):
         self.luggage = luggage
@@ -437,9 +425,9 @@ class Reservation(Base):
         if promotion.is_active:
             self.final_price = promotion.apply_discount(self.final_price)
 
-    def apply_loyalty_points(self, loyaltyProgram: "Loyalty_program"):
+    def apply_loyalty_points(self, loyalty_program: "Loyalty_program"):
         points = int(self.final_price // 10)
-        loyaltyProgram.add_points(self.passenger, points)
+        loyalty_program.add_points(self.passenger, points)
 
     def price(self):
         return self.final_price
@@ -448,8 +436,8 @@ class Reservation(Base):
         details = (
             f"Reservation ID: {self.id}\n"
             f"Passenger: {self.passenger.name}\n"
-            f"Flight: {self.flight.flight_number}\n"  # Now accessing flight_number directly from the 'flight' relationship
-            f"Status: {self.status.value}\n"
+            f"Flight: {self.flight.flight_number}\n"
+            f"Status: {self.status}\n"
             "Tickets:\n"
         )
         tickets_info = "\n".join(
@@ -470,6 +458,12 @@ class Ticket(Base):
     expiration_date = Column(DateTime)
     base_price = Column(Float)
     final_price = Column(Float)
+    
+    # Foreign key reference to Reservation
+    reservation_id = Column(Integer, ForeignKey('reservations.id'))
+
+    # Relationship to Reservation (one ticket belongs to one reservation)
+    reservation = relationship("Reservation", back_populates="tickets")
 
     base_prices = {
         "first": 6000.0,
@@ -480,7 +474,7 @@ class Ticket(Base):
 
     def __init__(self, passenger: "Passenger", flight: "Flight", seat_number: str, ticket_class: str, 
                  is_changeable: Optional[bool] = None, is_refundable: Optional[bool] = None, 
-                 promotion: Optional["Promotion"] = None):
+                 promotion: Optional["Promotion"] = None, reservation: Optional["Reservation"] = None):
         
         # Normalize ticket class
         ticket_class = ticket_class.strip().lower()
@@ -504,7 +498,10 @@ class Ticket(Base):
         # Set changeable and refundable based on ticket class if not provided
         self.is_changeable = is_changeable if is_changeable is not None else self.ticket_class in {"first", "business"}
         self.is_refundable = is_refundable if is_refundable is not None else self.ticket_class == "first"
-        
+
+        # Set reservation if provided
+        self.reservation = reservation
+
         # Save to database
         session = get_session()
         session.add(self)
@@ -512,9 +509,10 @@ class Ticket(Base):
         session.close()
 
         # Add the ticket to the latest reservation if available
-        latest_reservation = self.passenger.get_latest_reservation()
-        if latest_reservation:
-            latest_reservation.add_ticket(self)
+        if reservation is None:
+            latest_reservation = self.passenger.get_latest_reservation()
+            if latest_reservation:
+                latest_reservation.add_ticket(self)
 
     def get_ticket_number(self):
         return self.ticket_number  # Use auto-generated ticket_number
@@ -933,6 +931,8 @@ class Passenger(Base):
     # One-to-one relationship with Loyalty_program
     loyalty_program = relationship("Loyalty_program", back_populates="passenger", uselist=False)
 
+    reservations = relationship("Reservation", back_populates="passenger", cascade="all, delete-orphan")
+
     def __init__(self, name: str, national_id: str, email: str, phone_number: str, nationality: str, is_vip: bool, address: str, 
                  date_of_birth: str, passport_number: str, gender: str, frequent_flyer_number: str):
         self.name = name
@@ -1207,8 +1207,22 @@ def test_all_classes_and_relationships():
         session.commit()
 
         # Airlines
-        airline1 = Airline(name="Delta Airlines", code="DL", location="Atlanta", country_code="USA", IATAcode="DL", ICAOcode="DAL", headquarters="Atlanta", yearFounded=1924)
-        airline2 = Airline(name="American Airlines", code="AA", location="Dallas", country_code="USA", IATAcode="AA", ICAOcode="AAL", headquarters="Fort Worth", yearFounded=1930)
+        airline1 = Airline(
+            name="Delta Airlines", 
+            iata_code="DL", 
+            icao_code="DAL", 
+            headquarters="Atlanta", 
+            year_founded=1924, 
+            base_airport_code="ATL"
+        )
+        airline2 = Airline(
+            name="American Airlines", 
+            iata_code="AA", 
+            icao_code="AAL", 
+            headquarters="Fort Worth", 
+            year_founded=1930, 
+            base_airport_code="DFW"
+        )
         session.add_all([airline1, airline2])
         session.commit()
 
@@ -1218,8 +1232,8 @@ def test_all_classes_and_relationships():
         session.add_all([admin1, admin2])
 
         # Countries
-        country1 = Country(name="United States", code="US", continent="North America", officialLanguage="English", isSchengenZoneMember=False)
-        country2 = Country(name="Germany", code="DE", continent="Europe", officialLanguage="German", isSchengenZoneMember=True)
+        country1 = Country(name="United States", code="US", continent="North America", official_language="English", isSchengenZoneMember=False)
+        country2 = Country(name="Germany", code="DE", continent="Europe", official_language="German", isSchengenZoneMember=True)
         session.add_all([country1, country2])
 
         # Flights
@@ -1239,8 +1253,8 @@ def test_all_classes_and_relationships():
         session.commit()
 
         # Reservations
-        reservation1 = Reservation(passenger_id=passenger1.id, flight_number="DL123", reservation_id="R001", seat_number="1A", status="pending")
-        reservation2 = Reservation(passenger_id=passenger2.id, flight_number="AA456", reservation_id="R002", seat_number="2B", status="pending")
+        reservation1 = Reservation(passenger=passenger1, flight_id=flight1.id, reservation_id="R001", seat_number="1A", status=ReservationStatus.pending)
+        reservation2 = Reservation(passenger=passenger2, flight_id=flight2.id, reservation_id="R002", seat_number="2B", status=ReservationStatus.pending)
         session.add_all([reservation1, reservation2])
         session.commit()
 
@@ -1270,8 +1284,8 @@ def test_all_classes_and_relationships():
         session.add_all([agent1, agent2])
 
         # Payments
-        payment1 = Payment(payment_id="PAY001", amount=500.0, method="Credit Card", status="pending", payment_date=datetime.now(), transaction_id="TXN001", currency="USD", is_refundable=True, reservation_id=reservation1.reservation_id)
-        payment2 = Payment(payment_id="PAY002", amount=300.0, method="PayPal", status="completed", payment_date=datetime.now(), transaction_id="TXN002", currency="EUR", is_refundable=False, reservation_id=reservation2.reservation_id)
+        payment1 = Payment(payment_id="PAY001", amount=500.0, method="Credit Card", status="pending", payment_date=datetime.now(), transaction_id="TXN001", currency="USD", is_refundable=True, reservation_id=reservation1.id)
+        payment2 = Payment(payment_id="PAY002", amount=300.0, method="PayPal", status="completed", payment_date=datetime.now(), transaction_id="TXN002", currency="EUR", is_refundable=False, reservation_id=reservation2.id)
         session.add_all([payment1, payment2])
         session.commit()
 
